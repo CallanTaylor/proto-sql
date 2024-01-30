@@ -3,17 +3,202 @@ package protosql
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"reflect"
 	"strings"
 	"time"
 
+	"github.com/CallanTaylor/proto-sql/sqlproto"
 	schema "github.com/jimsmart/schema"
 )
+
+func ExecuteTransaction(data interface{}, db *sql.DB, crudOperation sqlproto.CRUDOperation, tableName string) error {
+
+	// Open a transaction
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	// Defer a function to either commit or rollback the transaction based on success or failure
+	defer func() {
+		if err != nil {
+			fmt.Printf("ERROR: SQL transaction failed - rolling back: %v", err)
+			// Rollback the transaction if an error occurred
+			tx.Rollback()
+			return
+		}
+		// Commit the transaction if all operations are successful
+		err = tx.Commit()
+		if err != nil {
+			return
+		}
+	}()
+
+	sqlStatement := ""
+
+	switch crudOperation {
+	case sqlproto.CRUDOperation_READ:
+		sqlStatement, err = GenerateGetSQL(data, tableName)
+	case sqlproto.CRUDOperation_UPDATE:
+		sqlStatement, err = GenerateUpdateSQL(data, tableName)
+	case sqlproto.CRUDOperation_CREATE:
+		sqlStatement, err = GenerateInsertSQL(data, tableName)
+	case sqlproto.CRUDOperation_DELETE:
+		sqlStatement, err = GenerateDeleteSQL(data, tableName)
+	}
+	if err != nil {
+		return fmt.Errorf("did not generate SQL statement : %v", err)
+	}
+
+	// Example: Insert data within a transaction
+	row := tx.QueryRow(sqlStatement)
+
+	// Get the type of the target struct
+	targetType := reflect.TypeOf(data).Elem()
+
+	// Get column names
+	columns, err := getColumns(db, tableName)
+	if err != nil {
+		return err
+	}
+
+	// Create a slice of interface{} to hold the values
+	values := make([]interface{}, len(columns))
+	for i := range columns {
+		values[i] = new(interface{})
+	}
+
+	// Scan values into the interface{} slice
+	err = row.Scan(values...)
+	if err != nil {
+		return err
+	}
+
+	// Create a new instance of the target struct
+	targetValue := reflect.New(targetType).Elem()
+
+	// messageValue := reflect.ValueOf(data)
+	messageType := reflect.TypeOf(data)
+	// If the messageType is a pointer, dereference it
+	if messageType.Kind() == reflect.Ptr {
+		messageType = messageType.Elem()
+	}
+
+	// fields := []string{}
+
+	// // Loop through the fields of the message and generate column definitions
+	// for i := 0; i < messageType.NumField(); i++ {
+
+	// 	fieldCheck := messageType.Field(i)
+	// 	fieldName := fieldCheck.Name
+	// 	fieldType := messageValue.Type().Field(i)
+
+	// 	exported := (fieldType.PkgPath == "")
+	// 	if !exported && !fieldType.Anonymous {
+	// 		continue
+	// 	}
+
+	// 	if messageValue.Field(i).IsZero() {
+	// 		fmt.Printf("Fiel %s is nil\n", fieldName)
+	// 		continue
+	// 	}
+
+	// 	columns = append(fields, fieldName)
+	// }
+
+	// Iterate over the fields of the struct and set values dynamically
+	for i, v := range values {
+
+		fieldCheck := messageType.Field(i + 3)
+		fieldName := fieldCheck.Name
+
+		field := targetValue.FieldByName(fieldName)
+		if field.IsValid() {
+			// Use reflection to set the field value based on its type
+			field.Set(reflect.ValueOf(*v.(*interface{})))
+		}
+	}
+
+	// Set the values back to the original target
+	reflect.ValueOf(data).Elem().Set(targetValue)
+
+	return nil
+
+}
+
+// getColumns retrieves column names from a table in the database
+func getColumns(db *sql.DB, tableName string) ([]string, error) {
+	var columns []string
+
+	// Query to get column names
+	query := fmt.Sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = $1")
+
+	// Query the database
+	rows, err := db.Query(query, tableName)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	// Scan column names
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return nil, err
+		}
+		columns = append(columns, column)
+		fmt.Printf("Got column: %s\n", column)
+	}
+
+	return columns, nil
+}
+
+func scanRows(data interface{}, rows *sql.Rows) (reflect.Value, error) {
+	// Get column names
+	columns, err := rows.Columns()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Create a slice of interface{} to hold the values
+	values := make([]interface{}, len(columns))
+	for i := range columns {
+		values[i] = new(interface{})
+	}
+
+	var user reflect.Value
+
+	// Iterate over the rows
+	for rows.Next() {
+		// Scan values into the interface{} slice
+		err := rows.Scan(values...)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		// Iterate over the fields of the struct and set values dynamically
+		for i, v := range values {
+
+			field := user.FieldByName(columns[i])
+			if field.IsValid() {
+				// Use reflection to set the field value based on its type
+				field.Set(reflect.ValueOf(v))
+			}
+		}
+
+		// Now, 'user' contains the values from the current row
+		fmt.Printf("User: %+v\n", user.Interface())
+	}
+
+	return user, nil
+}
 
 func GenerateGetSQL(data interface{}, tableName string) (string, error) {
 
 	// Get the reflected type of the protobuf message
 	messageType := reflect.TypeOf(data)
+	// Get the value type of the protobuf message
 	messageValue := reflect.ValueOf(data)
 
 	// If the messageValue is a pointer, dereference it
