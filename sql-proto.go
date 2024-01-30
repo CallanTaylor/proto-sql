@@ -3,7 +3,6 @@ package protosql
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"reflect"
 	"strings"
 	"time"
@@ -138,50 +137,9 @@ func getColumns(db *sql.DB, tableName string) ([]string, error) {
 			return nil, err
 		}
 		columns = append(columns, column)
-		fmt.Printf("Got column: %s\n", column)
 	}
 
 	return columns, nil
-}
-
-func scanRows(data interface{}, rows *sql.Rows) (reflect.Value, error) {
-	// Get column names
-	columns, err := rows.Columns()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	// Create a slice of interface{} to hold the values
-	values := make([]interface{}, len(columns))
-	for i := range columns {
-		values[i] = new(interface{})
-	}
-
-	var user reflect.Value
-
-	// Iterate over the rows
-	for rows.Next() {
-		// Scan values into the interface{} slice
-		err := rows.Scan(values...)
-		if err != nil {
-			log.Fatal(err)
-		}
-
-		// Iterate over the fields of the struct and set values dynamically
-		for i, v := range values {
-
-			field := user.FieldByName(columns[i])
-			if field.IsValid() {
-				// Use reflection to set the field value based on its type
-				field.Set(reflect.ValueOf(v))
-			}
-		}
-
-		// Now, 'user' contains the values from the current row
-		fmt.Printf("User: %+v\n", user.Interface())
-	}
-
-	return user, nil
 }
 
 func GenerateGetSQL(data interface{}, tableName string) (string, error) {
@@ -262,7 +220,6 @@ func GenerateUpdateSQL(data interface{}, tableName string) (string, error) {
 		}
 
 		if messageValue.Field(i).IsZero() {
-			fmt.Printf("Fiel %s is nil\n", fieldName)
 			continue
 		}
 
@@ -358,6 +315,12 @@ func GenerateCreateTableSQL(data interface{}, tableName string) string {
 
 	// Get the reflected type of the protobuf message
 	messageType := reflect.TypeOf(data)
+	messageValue := reflect.ValueOf(data)
+
+	// If the messageValue is a pointer, dereference it
+	if messageValue.Kind() == reflect.Ptr {
+		messageValue = messageValue.Elem()
+	}
 
 	// SQL statement to create the table
 	createTableSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", tableName)
@@ -373,9 +336,10 @@ func GenerateCreateTableSQL(data interface{}, tableName string) string {
 		field := messageType.Field(i)
 		fieldName := field.Name
 
-		// Skip non exported fields
-		if strings.ToLower(fieldName[:1]) == fieldName[:1] {
-			fmt.Printf("Field %s is not exported\n", fieldName)
+		fieldType := messageValue.Type().Field(i)
+
+		exported := (fieldType.PkgPath == "")
+		if !exported && !fieldType.Anonymous {
 			continue
 		}
 
@@ -424,6 +388,12 @@ func GenerateUpdateShemaSQL(db *sql.DB, tableName string, data interface{}) (str
 
 	// Get the reflected type of the protobuf message
 	messageType := reflect.TypeOf(data)
+	messageValue := reflect.ValueOf(data)
+
+	// If the messageValue is a pointer, dereference it
+	if messageValue.Kind() == reflect.Ptr {
+		messageValue = messageValue.Elem()
+	}
 
 	// If the messageType is a pointer, dereference it
 	if messageType.Kind() == reflect.Ptr {
@@ -443,12 +413,12 @@ func GenerateUpdateShemaSQL(db *sql.DB, tableName string, data interface{}) (str
 		field := messageType.Field(i)
 		fieldName := field.Name
 
-		// Skip non exported fields
-		if strings.ToLower(fieldName[:1]) == fieldName[:1] {
-			// fmt.Printf("Field %s is not exported\n", fieldName)
+		fieldType := messageValue.Type().Field(i)
+
+		exported := (fieldType.PkgPath == "")
+		if !exported && !fieldType.Anonymous {
 			continue
 		}
-
 		fieldNameLower := strings.ToLower(fieldName)
 
 		if !exists[fieldNameLower] {
@@ -493,4 +463,107 @@ func DetermineSQLType(fieldType reflect.Type) string {
 	default:
 		return "TEXT"
 	}
+}
+
+func UpdateTableSchema(tableName string, db *sql.DB, data interface{}) error {
+
+	sql, err := GenerateUpdateShemaSQL(db, tableName, data)
+	if err != nil {
+		return err
+	}
+
+	if sql == "" {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+
+	// Defer a function to either commit or rollback the transaction based on success or failure
+	defer func() {
+		if err != nil {
+			fmt.Printf("ERROR: SQL transaction failed - rolling back: %v", err)
+			// Rollback the transaction if an error occurred
+			tx.Rollback()
+			return
+		}
+		// Commit the transaction if all operations are successful
+		err = tx.Commit()
+		if err != nil {
+			return
+		}
+	}()
+
+	// Example: Insert data within a transaction
+	_, err = tx.Query(sql)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func CreateTableFromProto(db *sql.DB, data interface{}, messageName string) error {
+	// Get the reflected type of the protobuf message
+	messageType := reflect.TypeOf(data)
+	messageValue := reflect.ValueOf(data)
+
+	// If the messageValue is a pointer, dereference it
+	if messageValue.Kind() == reflect.Ptr {
+		messageValue = messageValue.Elem()
+	}
+
+	// SQL statement to create the table
+	createTableSQL := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (", messageName)
+
+	// Loop through the fields of the message and generate column definitions
+	for i := 0; i < messageType.NumField(); i++ {
+
+		field := messageType.Field(i)
+		fieldName := field.Name
+
+		fieldType := messageValue.Type().Field(i)
+
+		exported := (fieldType.PkgPath == "")
+		if !exported && !fieldType.Anonymous {
+			continue
+		}
+
+		// Determine the SQL type based on the field type
+		sqlType := DetermineSQLType(field.Type)
+
+		// Add the column definition to the SQL statement
+		createTableSQL += fmt.Sprintf("%s %s, ", fieldName, sqlType)
+	}
+
+	// Remove the trailing comma and space
+	createTableSQL = strings.TrimSuffix(createTableSQL, ", ")
+
+	// Close the CREATE TABLE statement
+	createTableSQL += ");"
+
+	// Execute the SQL statement
+	_, err := db.Exec(createTableSQL)
+	return err
+}
+
+func TableExists(db *sql.DB, tableName string) (bool, error) {
+	// Query the information schema to check if the table exists
+	query := `
+		SELECT EXISTS (
+			SELECT 1
+			FROM information_schema.tables
+			WHERE table_name = $1
+		);
+	`
+
+	var exists bool
+	err := db.QueryRow(query, tableName).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+
+	return exists, nil
 }
