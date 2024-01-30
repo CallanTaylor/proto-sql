@@ -85,35 +85,25 @@ func ExecuteTransaction(data interface{}, db *sql.DB, crudOperation sqlproto.CRU
 		messageType = messageType.Elem()
 	}
 
-	// fields := []string{}
+	fields := []string{}
 
-	// // Loop through the fields of the message and generate column definitions
-	// for i := 0; i < messageType.NumField(); i++ {
+	for i := 0; i < messageType.NumField(); i++ {
 
-	// 	fieldCheck := messageType.Field(i)
-	// 	fieldName := fieldCheck.Name
-	// 	fieldType := messageValue.Type().Field(i)
+		fieldCheck := messageType.Field(i)
+		fieldName := fieldCheck.Name
 
-	// 	exported := (fieldType.PkgPath == "")
-	// 	if !exported && !fieldType.Anonymous {
-	// 		continue
-	// 	}
+		exported := (fieldCheck.PkgPath == "")
+		if !exported && !fieldCheck.Anonymous {
+			continue
+		}
 
-	// 	if messageValue.Field(i).IsZero() {
-	// 		fmt.Printf("Fiel %s is nil\n", fieldName)
-	// 		continue
-	// 	}
-
-	// 	columns = append(fields, fieldName)
-	// }
+		fields = append(fields, fieldName)
+	}
 
 	// Iterate over the fields of the struct and set values dynamically
 	for i, v := range values {
 
-		fieldCheck := messageType.Field(i + 3)
-		fieldName := fieldCheck.Name
-
-		field := targetValue.FieldByName(fieldName)
+		field := targetValue.FieldByName(fields[i])
 		if field.IsValid() {
 			// Use reflection to set the field value based on its type
 			field.Set(reflect.ValueOf(*v.(*interface{})))
